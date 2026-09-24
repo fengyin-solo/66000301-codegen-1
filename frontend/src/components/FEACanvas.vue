@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, watch, nextTick } from 'vue';
 import { useFEAStore } from '../store/fea';
+import { TIER_META, TIER_ORDER } from '../utils/health';
+import type { HealthTier } from '../types';
 
 const store = useFEAStore();
 const canvas = ref<HTMLCanvasElement>();
@@ -17,6 +19,117 @@ function worldToScreen(x: number, y: number): [number, number] {
 
 function screenToWorld(sx: number, sy: number): [number, number] {
   return [(sx - offsetX) / scale, (sy - offsetY) / scale];
+}
+
+// Health-scoring overlay legend (top-left panel, separate from jet color bar)
+function drawHealthLegend(
+  W: number,
+  _H: number,
+  counts: Record<HealthTier, number>,
+  score: number,
+  filter: HealthTier | null,
+  unratedCount: number
+): void {
+  const ctx = canvas.value?.getContext('2d');
+  if (!ctx) return;
+
+  const x = 12;
+  let y = 12;
+  const w = 168;
+  const rowH = 17;
+  const h = 72 + rowH * 3 + (unratedCount > 0 ? rowH : 0) + (filter ? 16 : 0);
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(15,23,42,0.88)';
+  ctx.strokeStyle = '#475569';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  if (typeof ctx.roundRect === 'function') {
+    ctx.roundRect(x, y, w, h, 6);
+  } else {
+    ctx.rect(x, y, w, h);
+  }
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#e2e8f0';
+  ctx.font = 'bold 11px sans-serif';
+  ctx.fillText('结构健康评分', x + 10, y + 14);
+  ctx.fillStyle = '#34d399';
+  ctx.font = 'bold 12px sans-serif';
+  ctx.textAlign = 'right';
+  ctx.fillText(score.toFixed(1), x + w - 10, y + 14);
+
+  y += 28;
+  ctx.textAlign = 'left';
+  for (const tier of TIER_ORDER) {
+    const meta = TIER_META[tier];
+    const active = filter === tier;
+
+    if (active) {
+      ctx.fillStyle = 'rgba(51,65,85,0.8)';
+      ctx.fillRect(x + 4, y - rowH / 2 + 1, w - 8, rowH - 2);
+    }
+
+    // swatch: thick solid/dashed line like the overlay
+    ctx.beginPath();
+    ctx.moveTo(x + 12, y);
+    ctx.lineTo(x + 30, y);
+    ctx.strokeStyle = meta.color;
+    ctx.lineWidth = tier === 'safe' ? 2.5 : 4;
+    ctx.setLineDash(tier === 'warning' ? [6, 3] : []);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    if (tier === 'overlimit') {
+      ctx.fillStyle = meta.color;
+      for (const sx2 of [x + 12, x + 30]) {
+        ctx.beginPath();
+        ctx.rect(sx2 - 2.5, y - 2.5, 5, 5);
+        ctx.stroke();
+      }
+    }
+
+    ctx.fillStyle = active ? '#ffffff' : '#cbd5e1';
+    ctx.font = '11px sans-serif';
+    ctx.fillText(meta.label, x + 38, y);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = meta.color;
+    ctx.font = 'bold 11px sans-serif';
+    ctx.fillText(String(counts[tier]), x + w - 12, y);
+    ctx.textAlign = 'left';
+    y += rowH;
+  }
+
+  if (unratedCount > 0) {
+    ctx.beginPath();
+    ctx.moveTo(x + 12, y);
+    ctx.lineTo(x + 30, y);
+    ctx.strokeStyle = 'rgba(100,116,139,0.8)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([2, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '11px sans-serif';
+    ctx.fillText('未评分(缺参数)', x + 38, y);
+    ctx.textAlign = 'right';
+    ctx.fillText(String(unratedCount), x + w - 12, y);
+    ctx.textAlign = 'left';
+    y += rowH;
+  }
+
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#64748b';
+  ctx.font = '9px sans-serif';
+  ctx.fillText('实线/描边样式，与热力图区分', x + 10, y + 12);
+  if (filter) {
+    ctx.fillStyle = TIER_META[filter].color;
+    ctx.fillText(`仅显示「${TIER_META[filter].label}」档`, x + 10, y + 26);
+  }
+  ctx.restore();
 }
 
 function draw() {
@@ -61,6 +174,14 @@ function draw() {
     return [x * drawScale + drawOffsetX, y * drawScale + drawOffsetY];
   }
 
+  // When a health tier filter is active, members outside that tier are dimmed
+  // even in the base heatmap pass so only the selected tier stands out.
+  const healthFilterActive =
+    store.showHealthOverlay &&
+    !!store.healthScore &&
+    store.healthScore.elements.length > 0 &&
+    store.healthTierFilter !== null;
+
   // Draw elements with heatmap colors
   for (const el of elements) {
     const n1 = nodes.find((n) => n.id === el.nodeIds[0]);
@@ -71,13 +192,20 @@ function draw() {
     const [x2, y2] = toScreen(n2.x, n2.y);
     const color = store.elementColors.get(el.id) || '#6b7280';
     const isSelected = store.selectedElement === el.id;
+    const hItem = store.healthByElement.get(el.id);
+    const outsideFilter =
+      healthFilterActive &&
+      (!hItem || hItem.tier !== store.healthTierFilter);
 
+    ctx.save();
+    if (outsideFilter) ctx.globalAlpha = 0.12;
     ctx.beginPath();
     ctx.moveTo(x1, y1);
     ctx.lineTo(x2, y2);
     ctx.strokeStyle = color;
     ctx.lineWidth = isSelected ? 4 : 2.5;
     ctx.stroke();
+    ctx.restore();
 
     if (isSelected) {
       ctx.strokeStyle = '#ffffff';
@@ -89,6 +217,118 @@ function draw() {
       ctx.stroke();
       ctx.setLineDash([]);
     }
+  }
+
+  // ─── Health scoring overlay (distinct style from the heatmap) ─────────────
+  if (store.showHealthOverlay && store.healthScore && store.healthScore.elements.length > 0) {
+    const health = store.healthScore;
+    const filter = store.healthTierFilter;
+
+    // Elements excluded from scoring: gray dashed (not heatmap-colored)
+    for (const el of elements) {
+      if (store.healthByElement.has(el.id)) continue;
+      const n1 = nodes.find((n) => n.id === el.nodeIds[0]);
+      const n2 = nodes.find((n) => n.id === el.nodeIds[1]);
+      if (!n1 || !n2) continue;
+      const [x1, y1] = toScreen(n1.x, n1.y);
+      const [x2, y2] = toScreen(n2.x, n2.y);
+      ctx.save();
+      if (filter !== null) ctx.globalAlpha = 0.15;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.strokeStyle = 'rgba(100,116,139,0.55)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([2, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+
+    // Rated elements: solid/outline + glow per tier, dashed/dimmed never used
+    // for the heatmap colors above
+    for (const h of health.elements) {
+      const el = elements.find((e) => e.id === h.elementId);
+      if (!el) continue;
+      const n1 = nodes.find((n) => n.id === el.nodeIds[0]);
+      const n2 = nodes.find((n) => n.id === el.nodeIds[1]);
+      if (!n1 || !n2) continue;
+
+      const isFilteredOut = filter !== null && h.tier !== filter;
+      const meta = TIER_META[h.tier];
+      const [x1, y1] = toScreen(n1.x, n1.y);
+      const [x2, y2] = toScreen(n2.x, n2.y);
+      const isSelected = store.selectedElement === el.id;
+
+      // outer glow pass
+      ctx.save();
+      if (isFilteredOut) {
+        ctx.globalAlpha = 0.12;
+      } else {
+        ctx.shadowColor = meta.glow;
+        ctx.shadowBlur = h.tier === 'safe' ? 0 : 8;
+      }
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.strokeStyle = meta.color;
+      ctx.lineWidth = h.tier === 'overlimit' ? 5 : h.tier === 'warning' ? 4 : 2.5;
+      if (h.tier === 'warning') ctx.setLineDash([7, 4]);
+      else ctx.setLineDash([]);
+      ctx.stroke();
+      ctx.restore();
+
+      // overlimit: inner white dash + end markers to stand out from heatmap
+      if (!isFilteredOut && h.tier === 'overlimit') {
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        for (const [mx, my] of [[x1, y1], [x2, y2]] as number[][]) {
+          ctx.beginPath();
+          ctx.rect(mx - 3, my - 3, 6, 6);
+          ctx.strokeStyle = meta.color;
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        }
+      }
+
+      if (isSelected) {
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.strokeStyle = isFilteredOut ? 'rgba(255,255,255,0.35)' : '#ffffff';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([4, 3]);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      // utilization label (only elements visible under the current filter)
+      if (!isFilteredOut && h.tier !== 'safe') {
+        const mx = (x1 + x2) / 2;
+        const my = (y1 + y2) / 2;
+        const label = `${(h.utilization * 100).toFixed(0)}%`;
+        ctx.font = 'bold 10px sans-serif';
+        const tw = ctx.measureText(label).width;
+        ctx.fillStyle = 'rgba(15,23,42,0.85)';
+        ctx.fillRect(mx - tw / 2 - 3, my - 7, tw + 6, 13);
+        ctx.strokeStyle = meta.color;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(mx - tw / 2 - 3, my - 7, tw + 6, 13);
+        ctx.fillStyle = meta.color;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, mx, my);
+        ctx.textBaseline = 'alphabetic';
+      }
+    }
+
+    drawHealthLegend(W, H, health.counts, health.overallScore, filter, health.missingMaterialElementIds.length);
   }
 
   // Draw deformed mesh
@@ -214,7 +454,7 @@ function draw() {
   ctx.font = '10px sans-serif';
   ctx.textAlign = 'left';
 
-  let maxVal = 0, minVal = 0;
+  let maxVal = 0;
   if (store.result) {
     switch (store.heatmapMode) {
       case 'stress':
@@ -224,7 +464,7 @@ function draw() {
         maxVal = Math.max(...store.result.strains.map(Math.abs));
         break;
       case 'force':
-        maxVal = Math.max(...elements.map((e) => Math.abs(e.force)));
+        maxVal = Math.max(...store.result.forces.map(Math.abs));
         break;
     }
   }
@@ -343,6 +583,10 @@ watch(
     store.selectedElement,
     store.heatmapMode,
     store.elementColors,
+    store.showHealthOverlay,
+    store.healthTierFilter,
+    store.healthScore,
+    store.healthByElement,
   ],
   () => nextTick(draw),
   { deep: true }

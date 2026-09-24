@@ -144,6 +144,7 @@ export function solve(model: FEAModel): FEAResult {
     displacements: U,
     stresses,
     strains,
+    forces,
     maxDisplacement,
     maxStress,
     reactionForces,
@@ -207,6 +208,9 @@ export function buildTrussBeam(
   const dy = height / nDivY;
   const E = 200e9; // 200 GPa steel
   const A = 0.001; // 1000 mm²
+  // Material allowable stresses (Pa): chords/verticals Q235 steel, diagonals lower grade
+  const ALLOWABLE_CHORD = 235e6;
+  const ALLOWABLE_DIAGONAL = 160e6;
 
   const nodeGrid: number[][] = [];
   for (let iy = 0; iy <= nDivY; iy++) {
@@ -234,6 +238,7 @@ export function buildTrussBeam(
           nodeIds: [nodeGrid[iy][ix], nodeGrid[iy][ix + 1]],
           area: A,
           youngsModulus: E,
+          allowableStress: ALLOWABLE_CHORD,
           stress: 0, strain: 0, force: 0,
         });
       }
@@ -244,6 +249,7 @@ export function buildTrussBeam(
           nodeIds: [nodeGrid[iy][ix], nodeGrid[iy + 1][ix]],
           area: A,
           youngsModulus: E,
+          allowableStress: ALLOWABLE_CHORD,
           stress: 0, strain: 0, force: 0,
         });
       }
@@ -255,6 +261,7 @@ export function buildTrussBeam(
             nodeIds: [nodeGrid[iy][ix], nodeGrid[iy + 1][ix + 1]],
             area: A * 0.7,
             youngsModulus: E,
+            allowableStress: ALLOWABLE_DIAGONAL,
             stress: 0, strain: 0, force: 0,
           });
         } else {
@@ -263,6 +270,7 @@ export function buildTrussBeam(
             nodeIds: [nodeGrid[iy][ix + 1], nodeGrid[iy + 1][ix]],
             area: A * 0.7,
             youngsModulus: E,
+            allowableStress: ALLOWABLE_DIAGONAL,
             stress: 0, strain: 0, force: 0,
           });
         }
@@ -271,6 +279,31 @@ export function buildTrussBeam(
   }
 
   return { nodes, elements, loads: [] };
+}
+
+/**
+ * Demo helper: strip the allowable stress from elements whose both end nodes
+ * sit at the given coordinates, simulating members with missing material
+ * parameters (they are excluded from health scoring and listed separately).
+ */
+function markMissingMaterialParams(
+  model: FEAModel,
+  pairs: [number, number][][]
+): void {
+  const nodeAt = (x: number, y: number) =>
+    model.nodes.find(
+      (n) => Math.abs(n.x - x) < 1e-9 && Math.abs(n.y - y) < 1e-9
+    );
+  for (const pair of pairs) {
+    const ids = pair
+      .map(([x, y]) => nodeAt(x, y)?.id)
+      .filter((id): id is number => id !== undefined);
+    if (ids.length < 2) continue;
+    const el = model.elements.find(
+      (e) => ids.includes(e.nodeIds[0]) && ids.includes(e.nodeIds[1])
+    );
+    if (el) el.allowableStress = null;
+  }
 }
 
 export function buildCantileverBeam(
@@ -288,11 +321,16 @@ export function buildCantileverBeam(
     (n) => n.x === length && n.y === 0
   );
   if (rightTopNode) {
-    model.loads.push({ nodeId: rightTopNode.id, fx: 0, fy: -10000 });
+    model.loads.push({ nodeId: rightTopNode.id, fx: 0, fy: -35000 });
   }
   if (rightBottomNode) {
-    model.loads.push({ nodeId: rightBottomNode.id, fx: 0, fy: -10000 });
+    model.loads.push({ nodeId: rightBottomNode.id, fx: 0, fy: -35000 });
   }
+  // Two members without material data (missing allowable stress)
+  markMissingMaterialParams(model, [
+    [[0, 0], [0.5, 0]],
+    [[0, 0], [0.5, 0.5]],
+  ]);
   return model;
 }
 
@@ -323,8 +361,14 @@ export function buildBridgeTruss(
     return Math.abs(n.x - centerX) < Math.abs(best.x - centerX) ? n : best;
   }, null as Node | null);
   if (centerBottom) {
-    model.loads.push({ nodeId: centerBottom.id, fx: 0, fy: -50000 });
+    model.loads.push({ nodeId: centerBottom.id, fx: 0, fy: -300000 });
   }
+  // Members without material data (missing allowable stress)
+  markMissingMaterialParams(model, [
+    [[0, 0], [1, 0]],
+    [[1, 0], [1, 2]],
+    [[2, 0], [3, 2]],
+  ]);
   return model;
 }
 
@@ -344,8 +388,13 @@ export const presetSimpleFrame = (): FEAModel => {
     return Math.abs(n.x - 1.5) < Math.abs(best.x - 1.5) ? n : best;
   }, null as Node | null);
   if (topCenter) {
-    model.loads.push({ nodeId: topCenter.id, fx: 5000, fy: -20000 });
+    model.loads.push({ nodeId: topCenter.id, fx: 100000, fy: -400000 });
   }
+  // Members without material data (missing allowable stress)
+  markMissingMaterialParams(model, [
+    [[0, 0], [0.75, 0]],
+    [[1.5, 3], [2.25, 2.25]],
+  ]);
   return model;
 };
 

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useFEAStore } from '../store/fea';
+import { TIER_META } from '../utils/health';
 
 const store = useFEAStore();
 
@@ -36,6 +37,22 @@ const angle = computed(() => {
 const color = computed(() => {
   if (store.selectedElement === null) return '#6b7280';
   return store.elementColors.get(store.selectedElement) || '#6b7280';
+});
+
+// Values come from the same FEAResult array used by the heatmap and health score
+const values = computed(() =>
+  selectedEl.value ? store.elementResult(selectedEl.value.id) : null
+);
+
+const health = computed(() =>
+  selectedEl.value ? store.healthByElement.get(selectedEl.value.id) ?? null : null
+);
+
+const hasMaterial = computed(() => {
+  const a = selectedEl.value?.allowableStress;
+  return (
+    a !== null && a !== undefined && Number.isFinite(a) && (a as number) > 0
+  );
 });
 </script>
 
@@ -83,29 +100,79 @@ const color = computed(() => {
         </div>
       </div>
 
+      <!-- Material allowable stress -->
+      <div class="bg-slate-900 rounded p-2">
+        <div class="text-slate-400">材料许用应力</div>
+        <div v-if="hasMaterial" class="text-sm font-mono text-slate-200">
+          {{ ((selectedEl.allowableStress as number) / 1e6).toFixed(0) }} MPa
+        </div>
+        <div v-else class="text-sm font-mono text-amber-400">
+          缺失 · 不参与健康评分
+        </div>
+      </div>
+
       <div class="border-t border-slate-700 pt-2 mt-2">
         <div class="text-slate-400 mb-1">计算结果</div>
-        <div class="grid grid-cols-3 gap-2">
+        <div v-if="!values" class="text-slate-500 text-[11px] py-2 text-center">
+          尚未求解，点击「求解 FEA」后显示
+        </div>
+        <div v-else class="grid grid-cols-3 gap-2">
           <div class="bg-slate-900 rounded p-2">
             <div class="text-slate-500 text-[10px]">应力</div>
             <div class="text-sm font-bold" :style="{ color }">
-              {{ (selectedEl.stress / 1e6).toFixed(2) }}
+              {{ (values.stress / 1e6).toFixed(2) }}
               <span class="text-[10px] text-slate-500">MPa</span>
             </div>
           </div>
           <div class="bg-slate-900 rounded p-2">
             <div class="text-slate-500 text-[10px]">应变</div>
             <div class="text-sm font-bold text-sky-400">
-              {{ (selectedEl.strain * 100).toFixed(4) }}
+              {{ (values.strain * 100).toFixed(4) }}
               <span class="text-[10px] text-slate-500">%</span>
             </div>
           </div>
           <div class="bg-slate-900 rounded p-2">
             <div class="text-slate-500 text-[10px]">轴力</div>
             <div class="text-sm font-bold text-amber-400">
-              {{ (selectedEl.force / 1000).toFixed(2) }}
+              {{ (values.force / 1000).toFixed(2) }}
               <span class="text-[10px] text-slate-500">kN</span>
             </div>
+          </div>
+        </div>
+
+        <!-- Utilization / tier, from the same result -->
+        <div v-if="values" class="mt-2 bg-slate-900 rounded p-2">
+          <div class="flex items-center justify-between">
+            <span class="text-slate-400">利用率（|应力| / 许用）</span>
+            <span v-if="health"
+              class="text-[10px] font-bold px-1.5 py-0.5 rounded"
+              :style="{
+                color: '#0f172a',
+                backgroundColor: TIER_META[health.tier].color,
+              }"
+            >
+              {{ TIER_META[health.tier].label }}
+            </span>
+          </div>
+          <div v-if="health" class="flex items-center gap-2 mt-1">
+            <div class="flex-1 h-2 bg-slate-800 rounded overflow-hidden">
+              <div
+                class="h-full rounded transition-all"
+                :style="{
+                  width: Math.min(100, health.utilization * 100) + '%',
+                  backgroundColor: TIER_META[health.tier].color,
+                }"
+              />
+            </div>
+            <span
+              class="text-xs font-mono font-bold w-14 text-right"
+              :style="{ color: TIER_META[health.tier].color }"
+            >
+              {{ (health.utilization * 100).toFixed(1) }}%
+            </span>
+          </div>
+          <div v-else class="text-[11px] text-amber-400 mt-1">
+            材料许用应力缺失，该构件不参与健康评分
           </div>
         </div>
       </div>
