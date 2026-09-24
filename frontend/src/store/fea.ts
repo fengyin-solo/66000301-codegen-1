@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import type { FEAModel, FEAResult } from '../types';
+import type { FEAModel, FEAResult, ElementHealth, HealthGrade } from '../types';
 import {
   solve as feaSolve,
   presetCantileverBeam,
@@ -8,6 +8,7 @@ import {
   presetSimpleFrame,
   jetColormap,
 } from '../utils/fea-solver';
+import { computeHealth } from '../utils/health-score';
 
 export const useFEAStore = defineStore('fea', () => {
   const model = ref<FEAModel>({ nodes: [], elements: [], loads: [] });
@@ -18,11 +19,19 @@ export const useFEAStore = defineStore('fea', () => {
   const selectedElement = ref<number | null>(null);
   const heatmapMode = ref<'stress' | 'strain' | 'force'>('stress');
 
+  // Structural health overlay
+  const showHealth = ref(false);
+  // null = show all grades; otherwise only members of the selected grade
+  const healthGradeFilter = ref<HealthGrade | null>(null);
+
   // ─── Actions ──────────────────────────────────────────────────────────────
   function loadPreset(name: string) {
     selectedPreset.value = name;
+    // Switching a case drops the previous solve: score overlay and colors
+    // must be derived from the new model's own (next) solve run.
     result.value = null;
     selectedElement.value = null;
+    healthGradeFilter.value = null;
     switch (name) {
       case 'cantilever':
         model.value = presetCantileverBeam();
@@ -39,6 +48,8 @@ export const useFEAStore = defineStore('fea', () => {
   }
 
   function solve() {
+    // A single new result object is the only source of truth for canvas
+    // colors, element details and the health score.
     result.value = feaSolve(model.value);
   }
 
@@ -52,6 +63,15 @@ export const useFEAStore = defineStore('fea', () => {
 
   function setHeatmapMode(mode: 'stress' | 'strain' | 'force') {
     heatmapMode.value = mode;
+  }
+
+  function toggleHealth() {
+    showHealth.value = !showHealth.value;
+    if (!showHealth.value) healthGradeFilter.value = null;
+  }
+
+  function toggleHealthGradeFilter(grade: HealthGrade) {
+    healthGradeFilter.value = healthGradeFilter.value === grade ? null : grade;
   }
 
   function addLoad(nodeId: number, fx: number, fy: number) {
@@ -92,7 +112,7 @@ export const useFEAStore = defineStore('fea', () => {
         values = result.value.strains.map(Math.abs);
         break;
       case 'force':
-        values = model.value.elements.map((e) => Math.abs(e.force));
+        values = result.value.forces.map(Math.abs);
         break;
       default:
         values = result.value.stresses.map(Math.abs);
@@ -110,6 +130,31 @@ export const useFEAStore = defineStore('fea', () => {
     return colors;
   });
 
+  // ─── Health score (derived strictly from the current result) ──────────────
+  const healthReport = computed(() => computeHealth(model.value, result.value));
+
+  const healthByElement = computed(() => {
+    const map = new Map<number, ElementHealth>();
+    for (const it of healthReport.value.items) map.set(it.elementId, it);
+    return map;
+  });
+
+  /** Per-element result accessor — single source for canvas and detail panel. */
+  function elementResult(index: number) {
+    if (!result.value) return null;
+    return {
+      stress: result.value.stresses[index] ?? 0,
+      strain: result.value.strains[index] ?? 0,
+      force: result.value.forces[index] ?? 0,
+    };
+  }
+
+  function elementResultById(id: number) {
+    const index = model.value.elements.findIndex((e) => e.id === id);
+    if (index < 0) return null;
+    return elementResult(index);
+  }
+
   return {
     model,
     result,
@@ -118,14 +163,21 @@ export const useFEAStore = defineStore('fea', () => {
     deformationScale,
     selectedElement,
     heatmapMode,
+    showHealth,
+    healthGradeFilter,
     maxStress,
     maxDisplacement,
     elementColors,
+    healthReport,
+    healthByElement,
+    elementResultById,
     loadPreset,
     solve,
     toggleDeformed,
     selectElement,
     setHeatmapMode,
+    toggleHealth,
+    toggleHealthGradeFilter,
     addLoad,
     toggleFixed,
   };

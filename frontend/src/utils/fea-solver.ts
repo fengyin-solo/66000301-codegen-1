@@ -1,5 +1,11 @@
 import type { FEAModel, FEAResult, Node, Element, Load } from '../types';
 
+// ─── Material allowable stresses (absolute values, Pa) ─────────────────────
+// Used by the structural health score: utilization = |stress| / allowable.
+export const ALLOWABLE_Q235 = 235e6; // 235 MPa, structural steel (default chords)
+export const ALLOWABLE_Q195 = 195e6; // 195 MPa, lower grade steel
+export const ALLOWABLE_BAR = 160e6;  // 160 MPa, older/smaller bracing bars
+
 // ─── FEA Solver ─────────────────────────────────────────────────────────────
 export function solve(model: FEAModel): FEAResult {
   const { nodes, elements, loads } = model;
@@ -144,6 +150,7 @@ export function solve(model: FEAModel): FEAResult {
     displacements: U,
     stresses,
     strains,
+    forces,
     maxDisplacement,
     maxStress,
     reactionForces,
@@ -234,6 +241,7 @@ export function buildTrussBeam(
           nodeIds: [nodeGrid[iy][ix], nodeGrid[iy][ix + 1]],
           area: A,
           youngsModulus: E,
+          allowableStress: ALLOWABLE_Q235,
           stress: 0, strain: 0, force: 0,
         });
       }
@@ -244,6 +252,7 @@ export function buildTrussBeam(
           nodeIds: [nodeGrid[iy][ix], nodeGrid[iy + 1][ix]],
           area: A,
           youngsModulus: E,
+          allowableStress: ALLOWABLE_Q235,
           stress: 0, strain: 0, force: 0,
         });
       }
@@ -255,6 +264,7 @@ export function buildTrussBeam(
             nodeIds: [nodeGrid[iy][ix], nodeGrid[iy + 1][ix + 1]],
             area: A * 0.7,
             youngsModulus: E,
+            allowableStress: ALLOWABLE_BAR,
             stress: 0, strain: 0, force: 0,
           });
         } else {
@@ -263,6 +273,7 @@ export function buildTrussBeam(
             nodeIds: [nodeGrid[iy][ix + 1], nodeGrid[iy + 1][ix]],
             area: A * 0.7,
             youngsModulus: E,
+            allowableStress: ALLOWABLE_BAR,
             stress: 0, strain: 0, force: 0,
           });
         }
@@ -279,8 +290,7 @@ export function buildCantileverBeam(
   nElements: number
 ): FEAModel {
   const model = buildTrussBeam(length, height, nElements, 2);
-  const N = model.nodes.length;
-  // Apply downward load at right end
+  // Apply downward load at right end (heavy load => fixed-end chords reach yield range)
   const rightTopNode = model.nodes.find(
     (n) => n.x === length && n.y === height
   );
@@ -288,10 +298,20 @@ export function buildCantileverBeam(
     (n) => n.x === length && n.y === 0
   );
   if (rightTopNode) {
-    model.loads.push({ nodeId: rightTopNode.id, fx: 0, fy: -10000 });
+    model.loads.push({ nodeId: rightTopNode.id, fx: 0, fy: -40000 });
   }
   if (rightBottomNode) {
-    model.loads.push({ nodeId: rightBottomNode.id, fx: 0, fy: -10000 });
+    model.loads.push({ nodeId: rightBottomNode.id, fx: 0, fy: -40000 });
+  }
+  // A couple of newly replaced members have no material certificate on file:
+  // their allowable stress is unknown, so they are excluded from health scoring.
+  for (const el of model.elements) {
+    const n1 = model.nodes.find((n) => n.id === el.nodeIds[0])!;
+    const n2 = model.nodes.find((n) => n.id === el.nodeIds[1])!;
+    const isDiag = Math.abs(n1.x - n2.x) > 1e-9 && Math.abs(n1.y - n2.y) > 1e-9;
+    if (isDiag && (n1.x === 0 || n2.x === 0)) {
+      el.allowableStress = undefined;
+    }
   }
   return model;
 }
@@ -315,7 +335,7 @@ export function buildBridgeTruss(
     // We'll handle this by unfixing x in the solve step - for simplicity just fix both
   }
 
-  // Load at center bottom
+  // Load at center bottom (heavy service load, 4x the nominal value)
   const centerX = span / 2;
   const centerBottom = model.nodes.reduce((best, n) => {
     if (n.y !== 0) return best;
@@ -323,7 +343,24 @@ export function buildBridgeTruss(
     return Math.abs(n.x - centerX) < Math.abs(best.x - centerX) ? n : best;
   }, null as Node | null);
   if (centerBottom) {
-    model.loads.push({ nodeId: centerBottom.id, fx: 0, fy: -50000 });
+    model.loads.push({ nodeId: centerBottom.id, fx: 0, fy: -200000 });
+  }
+
+  // Material grading: diagonals are Q195 bars (195 MPa); the two most heavily
+  // loaded center top chords were fabricated from older stock rated 160 MPa;
+  // one end vertical lacks a material certificate and is excluded from scoring.
+  for (const el of model.elements) {
+    const n1 = model.nodes.find((n) => n.id === el.nodeIds[0])!;
+    const n2 = model.nodes.find((n) => n.id === el.nodeIds[1])!;
+    const isDiag = Math.abs(n1.x - n2.x) > 1e-9 && Math.abs(n1.y - n2.y) > 1e-9;
+    const isVert = Math.abs(n1.x - n2.x) < 1e-9;
+    const isChord = Math.abs(n1.y - n2.y) < 1e-9;
+    if (isDiag) el.allowableStress = ALLOWABLE_Q195;
+    if (isVert && n1.x === span) el.allowableStress = undefined;
+    if (isChord && n1.y === height && n1.x >= centerX - 1.001 && n2.x <= centerX + 1.001) {
+      // the single center-panel top chord (two panels for even nPanels)
+      el.allowableStress = ALLOWABLE_BAR;
+    }
   }
   return model;
 }
@@ -337,14 +374,31 @@ export const presetSimpleFrame = (): FEAModel => {
   for (const node of model.nodes) {
     if (node.y === 0) node.fixed = true;
   }
-  // Apply load at top center
+  // Apply load at top center (seismic/heavy load, 16x the nominal value)
   const topCenter = model.nodes.reduce((best, n) => {
     if (n.y !== 3) return best;
     if (!best) return n;
     return Math.abs(n.x - 1.5) < Math.abs(best.x - 1.5) ? n : best;
   }, null as Node | null);
   if (topCenter) {
-    model.loads.push({ nodeId: topCenter.id, fx: 5000, fy: -20000 });
+    model.loads.push({ nodeId: topCenter.id, fx: 80000, fy: -320000 });
+  }
+  // Lower-grade bracing (Q195, 195 MPa) for all diagonal members; the heavily
+  // loaded inner diagonal (2.25,2.25)-(1.5,3) is older 160 MPa stock, and one
+  // corner replacement brace has no material certificate on file (excluded).
+  for (const el of model.elements) {
+    const n1 = model.nodes.find((n) => n.id === el.nodeIds[0])!;
+    const n2 = model.nodes.find((n) => n.id === el.nodeIds[1])!;
+    const isDiag = Math.abs(n1.x - n2.x) > 1e-9 && Math.abs(n1.y - n2.y) > 1e-9;
+    if (!isDiag) continue;
+    const coords = [n1.x, n1.y, n2.x, n2.y].join(',');
+    if (n1.x === 0 && n1.y === 0) {
+      el.allowableStress = undefined;
+    } else if (coords === '2.25,2.25,1.5,3' || coords === '1.5,3,2.25,2.25') {
+      el.allowableStress = ALLOWABLE_BAR;
+    } else {
+      el.allowableStress = ALLOWABLE_Q195;
+    }
   }
   return model;
 };

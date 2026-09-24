@@ -46,6 +46,18 @@ const store = useFEAStore();
       ⚙ 求解 FEA
     </button>
 
+    <!-- Health overlay toggle -->
+    <label class="flex items-center gap-2 cursor-pointer">
+      <input
+        type="checkbox"
+        :checked="store.showHealth"
+        @change="store.toggleHealth()"
+        :disabled="!store.result"
+        class="accent-emerald-500 disabled:opacity-40"
+      />
+      <span class="text-xs text-slate-300">叠加结构健康评分</span>
+    </label>
+
     <!-- Deformed mesh toggle -->
     <label class="flex items-center gap-2 cursor-pointer">
       <input

@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, watch, nextTick } from 'vue';
 import { useFEAStore } from '../store/fea';
+import { HEALTH_COLORS } from '../utils/health-score';
+import type { HealthGrade } from '../types';
 
 const store = useFEAStore();
 const canvas = ref<HTMLCanvasElement>();
@@ -62,6 +64,9 @@ function draw() {
   }
 
   // Draw elements with heatmap colors
+  const healthOn = store.showHealth && !!store.result;
+  const gradeFilter = store.healthGradeFilter;
+
   for (const el of elements) {
     const n1 = nodes.find((n) => n.id === el.nodeIds[0]);
     const n2 = nodes.find((n) => n.id === el.nodeIds[1]);
@@ -71,7 +76,15 @@ function draw() {
     const [x2, y2] = toScreen(n2.x, n2.y);
     const color = store.elementColors.get(el.id) || '#6b7280';
     const isSelected = store.selectedElement === el.id;
+    const health = healthOn ? store.healthByElement.get(el.id) : undefined;
+    const excluded = healthOn && !health;
+    // With a grade filter, only members of that grade (+ the selection) stay
+    // visible; everything else is reduced to a faint ghost for context.
+    const matchesFilter =
+      !gradeFilter || (!!health && health.grade === gradeFilter);
+    const ghosted = healthOn && !!gradeFilter && !matchesFilter && !isSelected;
 
+    ctx.globalAlpha = ghosted ? 0.1 : 1;
     ctx.beginPath();
     ctx.moveTo(x1, y1);
     ctx.lineTo(x2, y2);
@@ -88,6 +101,52 @@ function draw() {
       ctx.lineTo(x2, y2);
       ctx.stroke();
       ctx.setLineDash([]);
+    }
+    ctx.globalAlpha = 1;
+
+    // Health overlay: flat categorical colors with a soft glow + rounded caps,
+    // visually distinct from the continuous Jet heatmap underneath.
+    if (healthOn) {
+      if (health) {
+        if (!gradeFilter || matchesFilter || isSelected) {
+          ctx.save();
+          ctx.lineCap = 'round';
+          // Glow halo
+          ctx.shadowColor = HEALTH_COLORS[health.grade];
+          ctx.shadowBlur = health.grade === 'over' ? 12 : 7;
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.strokeStyle = HEALTH_COLORS[health.grade];
+          ctx.lineWidth = health.grade === 'over' ? 5.5 : 4;
+          ctx.stroke();
+          ctx.restore();
+
+          // Over-limit members get a second dashed red outline for emphasis
+          if (health.grade === 'over' && (!gradeFilter || matchesFilter)) {
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.strokeStyle = '#fecaca';
+            ctx.lineWidth = 1.2;
+            ctx.setLineDash([3, 3]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+          }
+        }
+      } else if (excluded) {
+        // Members excluded from scoring (missing material data): gray dashed
+        if (!ghosted) {
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.strokeStyle = '#94a3b8';
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([2, 4]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+      }
     }
   }
 
@@ -190,61 +249,126 @@ function draw() {
     ctx.fillText(`${(mag / 1000).toFixed(1)}kN`, x - dx / 2, y - dy / 2 - 6);
   }
 
-  // Draw color legend bar
-  const legendX = W - 40;
-  const legendY = 30;
-  const legendH = H - 60;
-  const legendW = 15;
+  if (store.showHealth && store.result) {
+    // Discrete health-grade legend (replaces the continuous Jet bar)
+    const lx = W - 150;
+    let ly = 30;
+    const report = store.healthReport;
+    const grades: HealthGrade[] = ['safe', 'warning', 'over'];
+    const gradeNames = { safe: '安全', warning: '预警', over: '超限' };
 
-  const gradient = ctx.createLinearGradient(0, legendY, 0, legendY + legendH);
-  gradient.addColorStop(0, 'rgb(255,0,0)');
-  gradient.addColorStop(0.25, 'rgb(255,255,0)');
-  gradient.addColorStop(0.5, 'rgb(0,255,0)');
-  gradient.addColorStop(0.75, 'rgb(0,255,255)');
-  gradient.addColorStop(1, 'rgb(0,0,128)');
+    ctx.textAlign = 'left';
+    ctx.font = 'bold 11px sans-serif';
+    ctx.fillStyle = '#cbd5e1';
+    ctx.fillText('健康评分档位', lx, ly);
+    ly += 12;
 
-  ctx.fillStyle = gradient;
-  ctx.fillRect(legendX, legendY, legendW, legendH);
-  ctx.strokeStyle = '#475569';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(legendX, legendY, legendW, legendH);
-
-  // Legend labels
-  ctx.fillStyle = '#94a3b8';
-  ctx.font = '10px sans-serif';
-  ctx.textAlign = 'left';
-
-  let maxVal = 0, minVal = 0;
-  if (store.result) {
-    switch (store.heatmapMode) {
-      case 'stress':
-        maxVal = Math.max(...store.result.stresses.map(Math.abs));
-        break;
-      case 'strain':
-        maxVal = Math.max(...store.result.strains.map(Math.abs));
-        break;
-      case 'force':
-        maxVal = Math.max(...elements.map((e) => Math.abs(e.force)));
-        break;
+    for (const g of grades) {
+      const active = store.healthGradeFilter === g;
+      ctx.fillStyle = HEALTH_COLORS[g];
+      ctx.fillRect(lx, ly, 14, 10);
+      if (active) {
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(lx - 1.5, ly - 1.5, 17, 13);
+      }
+      ctx.font = '11px sans-serif';
+      ctx.fillStyle = active ? '#f1f5f9' : '#94a3b8';
+      ctx.fillText(
+        `${gradeNames[g]}  ${report.counts[g]} 根` +
+          (g === 'warning' ? ' (0.6–1.0)' : g === 'over' ? ' (≥1.0)' : ' (<0.6)'),
+        lx + 20,
+        ly + 9
+      );
+      ly += 18;
     }
+
+    ctx.fillStyle = '#94a3b8';
+    ctx.setLineDash([2, 4]);
+    ctx.strokeStyle = '#94a3b8';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(lx, ly + 4);
+    ctx.lineTo(lx + 14, ly + 4);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillText(`材料缺失  ${report.excludedElementIds.length} 根`, lx + 20, ly + 8);
+    ly += 22;
+
+    ctx.fillStyle = '#cbd5e1';
+    ctx.font = '11px sans-serif';
+    ctx.fillText(
+      report.score === null
+        ? '整体评分：—'
+        : `整体评分：${report.score} / 100`,
+      lx,
+      ly
+    );
+    ly += 16;
+    ctx.fillStyle = '#64748b';
+    ctx.font = '10px sans-serif';
+    ctx.fillText(
+      `最大利用率 ${(report.worstUtilization * 100).toFixed(0)}%`,
+      lx,
+      ly
+    );
+  } else {
+    // Draw color legend bar
+    const legendX = W - 40;
+    const legendY = 30;
+    const legendH = H - 60;
+    const legendW = 15;
+
+    const gradient = ctx.createLinearGradient(0, legendY, 0, legendY + legendH);
+    gradient.addColorStop(0, 'rgb(255,0,0)');
+    gradient.addColorStop(0.25, 'rgb(255,255,0)');
+    gradient.addColorStop(0.5, 'rgb(0,255,0)');
+    gradient.addColorStop(0.75, 'rgb(0,255,255)');
+    gradient.addColorStop(1, 'rgb(0,0,128)');
+
+    ctx.fillStyle = gradient;
+    ctx.fillRect(legendX, legendY, legendW, legendH);
+    ctx.strokeStyle = '#475569';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(legendX, legendY, legendW, legendH);
+
+    // Legend labels
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'left';
+
+    let maxVal = 0;
+    if (store.result) {
+      switch (store.heatmapMode) {
+        case 'stress':
+          maxVal = Math.max(...store.result.stresses.map(Math.abs));
+          break;
+        case 'strain':
+          maxVal = Math.max(...store.result.strains.map(Math.abs));
+          break;
+        case 'force':
+          maxVal = Math.max(...store.result.forces.map(Math.abs));
+          break;
+      }
+    }
+
+    const unit = store.heatmapMode === 'stress' ? 'MPa' :
+      store.heatmapMode === 'strain' ? '%' : 'kN';
+
+    ctx.textAlign = 'right';
+    ctx.fillText(`${maxVal.toExponential(1)} ${unit}`, legendX - 4, legendY + 8);
+    ctx.fillText('0', legendX - 4, legendY + legendH);
+
+    // Mode label
+    ctx.save();
+    ctx.translate(legendX + legendW + 10, legendY + legendH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#64748b';
+    ctx.font = '11px sans-serif';
+    ctx.fillText(store.heatmapMode.toUpperCase(), 0, 0);
+    ctx.restore();
   }
-
-  const unit = store.heatmapMode === 'stress' ? 'MPa' :
-    store.heatmapMode === 'strain' ? '%' : 'kN';
-
-  ctx.textAlign = 'right';
-  ctx.fillText(`${maxVal.toExponential(1)} ${unit}`, legendX - 4, legendY + 8);
-  ctx.fillText('0', legendX - 4, legendY + legendH);
-
-  // Mode label
-  ctx.save();
-  ctx.translate(legendX + legendW + 10, legendY + legendH / 2);
-  ctx.rotate(-Math.PI / 2);
-  ctx.textAlign = 'center';
-  ctx.fillStyle = '#64748b';
-  ctx.font = '11px sans-serif';
-  ctx.fillText(store.heatmapMode.toUpperCase(), 0, 0);
-  ctx.restore();
 }
 
 function handleMouseDown(e: MouseEvent) {
@@ -343,6 +467,9 @@ watch(
     store.selectedElement,
     store.heatmapMode,
     store.elementColors,
+    store.showHealth,
+    store.healthGradeFilter,
+    store.healthReport,
   ],
   () => nextTick(draw),
   { deep: true }

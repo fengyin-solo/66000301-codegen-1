@@ -1,12 +1,25 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useFEAStore } from '../store/fea';
+import { HEALTH_COLORS, HEALTH_LABELS } from '../utils/health-score';
 
 const store = useFEAStore();
 
 const selectedEl = computed(() => {
   if (store.selectedElement === null) return null;
   return store.model.elements.find((e) => e.id === store.selectedElement) || null;
+});
+
+// Stress / strain / force always come from the current FEAResult — the same
+// object the canvas colors and health score are derived from.
+const selectedResult = computed(() => {
+  if (store.selectedElement === null) return null;
+  return store.elementResultById(store.selectedElement);
+});
+
+const health = computed(() => {
+  if (store.selectedElement === null) return null;
+  return store.healthByElement.get(store.selectedElement) ?? null;
 });
 
 const node1 = computed(() => {
@@ -54,6 +67,22 @@ const color = computed(() => {
       <div class="flex items-center gap-2 mb-3">
         <div class="w-4 h-4 rounded" :style="{ backgroundColor: color }" />
         <span class="text-slate-300 font-medium">单元 #{{ selectedEl.id }}</span>
+        <span
+          v-if="health"
+          class="ml-auto text-[10px] font-bold px-1.5 py-0.5 rounded"
+          :style="{
+            color: '#0f172a',
+            backgroundColor: HEALTH_COLORS[health.grade],
+          }"
+        >
+          {{ HEALTH_LABELS[health.grade] }}
+        </span>
+        <span
+          v-else-if="selectedResult && selectedEl.allowableStress === undefined"
+          class="ml-auto text-[10px] px-1.5 py-0.5 rounded bg-slate-700 text-slate-400 border border-dashed border-slate-500"
+        >
+          材料缺失
+        </span>
       </div>
 
       <div class="grid grid-cols-2 gap-2">
@@ -85,28 +114,60 @@ const color = computed(() => {
 
       <div class="border-t border-slate-700 pt-2 mt-2">
         <div class="text-slate-400 mb-1">计算结果</div>
-        <div class="grid grid-cols-3 gap-2">
+        <div v-if="!selectedResult" class="text-[11px] text-slate-500 bg-slate-900 rounded p-2">
+          尚未求解，暂无结果数值
+        </div>
+        <div v-else class="grid grid-cols-3 gap-2">
           <div class="bg-slate-900 rounded p-2">
             <div class="text-slate-500 text-[10px]">应力</div>
             <div class="text-sm font-bold" :style="{ color }">
-              {{ (selectedEl.stress / 1e6).toFixed(2) }}
+              {{ (selectedResult.stress / 1e6).toFixed(2) }}
               <span class="text-[10px] text-slate-500">MPa</span>
             </div>
           </div>
           <div class="bg-slate-900 rounded p-2">
             <div class="text-slate-500 text-[10px]">应变</div>
             <div class="text-sm font-bold text-sky-400">
-              {{ (selectedEl.strain * 100).toFixed(4) }}
+              {{ (selectedResult.strain * 100).toFixed(4) }}
               <span class="text-[10px] text-slate-500">%</span>
             </div>
           </div>
           <div class="bg-slate-900 rounded p-2">
             <div class="text-slate-500 text-[10px]">轴力</div>
             <div class="text-sm font-bold text-amber-400">
-              {{ (selectedEl.force / 1000).toFixed(2) }}
+              {{ (selectedResult.force / 1000).toFixed(2) }}
               <span class="text-[10px] text-slate-500">kN</span>
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- Health / utilization row -->
+      <div v-if="selectedResult" class="border-t border-slate-700 pt-2">
+        <div class="text-slate-400 mb-1">健康评分</div>
+        <div v-if="health" class="bg-slate-900 rounded p-2 grid grid-cols-3 gap-2">
+          <div>
+            <div class="text-slate-500 text-[10px]">许用应力</div>
+            <div class="text-sm font-mono text-slate-200">
+              {{ (health.allowableStress / 1e6).toFixed(0) }}
+              <span class="text-[10px] text-slate-500">MPa</span>
+            </div>
+          </div>
+          <div>
+            <div class="text-slate-500 text-[10px]">利用率</div>
+            <div class="text-sm font-mono font-bold" :style="{ color: HEALTH_COLORS[health.grade] }">
+              {{ (health.utilization * 100).toFixed(1) }}%
+            </div>
+          </div>
+          <div>
+            <div class="text-slate-500 text-[10px]">构件评分</div>
+            <div class="text-sm font-mono font-bold" :style="{ color: HEALTH_COLORS[health.grade] }">
+              {{ health.score }}
+            </div>
+          </div>
+        </div>
+        <div v-else class="text-[11px] text-slate-500 bg-slate-900 rounded p-2 leading-4">
+          该构件缺少材料许用应力，无法计算利用率，<br />不参与结构健康评分。
         </div>
       </div>
     </div>
